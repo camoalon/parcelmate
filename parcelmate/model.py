@@ -406,7 +406,8 @@ def align_samples(
 
     return parcellation
 
-
+# Generate a a "connectome" (correlation matrix) between all pairs of hidden activations 
+# in the model from a sample of text from some dataset/domain.
 def run_connectivity(
         model_name='gpt2',
         output_dir=OUTPUT_DIR,
@@ -442,6 +443,7 @@ def run_connectivity(
 
     connectivity_dir = os.path.join(output_dir, CONNECTIVITY_NAME)
 
+    # Intervention: knockout subnetworks (optional)
     knockout_probs = knockout_coordinates = None
     if knockout_filepath is not None:
         data = load_h5_data(knockout_filepath, verbose=verbose, indent=indent)
@@ -449,6 +451,7 @@ def run_connectivity(
         knockout_probs = data['parcellation']
         knockout_coordinates = data['coordinates']
 
+    # Load model and tokenizer
     model, tokenizer = get_model_and_tokenizer(
         model_name,
         knockout_probs=knockout_probs,
@@ -459,6 +462,7 @@ def run_connectivity(
     if isinstance(domains, str):
         domains = (domains,)
 
+    # Load datasets
     for domain in domains:
         if verbose:
             stderr('%sRunning connectivity for %s\n' % (' ' * indent, domain))
@@ -499,6 +503,7 @@ def run_connectivity(
         _data_kwargs['trust_remote_code'] = True
         _data_kwargs['tokenizer'] = tokenizer
 
+        # Draw a sample from the data
         input_ids, attention_mask = get_dataset(
             n_tokens=n_tokens * n_samples,
             split=split,
@@ -540,9 +545,11 @@ def run_connectivity(
             else:
                 out = {}
             indent += 2
+            # Compute correlation across activations for different tokens
             if 'connectivity' not in out or 'coordinates' not in out:
                 _input_ids = input_ids[i:i+n]
                 _attention_mask = attention_mask[i:i+n]
+                # Get activations for text sample
                 out = get_timecourses(
                     model,
                     _input_ids,
@@ -557,9 +564,9 @@ def run_connectivity(
                     indent=indent,
                     **model_kwargs
                 )
-                timecourses = out['timecourses']
-                coordinates = out['coordinates']
-                _connectivity = get_connectivity(timecourses)
+                timecourses = out['timecourses'] # Activations matrix: (#layers x #embedding_size, #tokens)
+                coordinates = out['coordinates'] # Coordinates matrix: [i,0] = layer of ith row, [i,1] dimension of ith row (within layer) of timecourse matrix
+                _connectivity = get_connectivity(timecourses) # Correlation matrix: element (i,j) is the correlation between dimension corrdinates[i,1] from layer coordinates[i,0] and idem for j.
                 save = True
                 new = True
             else:
@@ -610,7 +617,7 @@ def run_connectivity(
             )
         indent -= 2
 
-
+# Probabilistically parcellate the connectome into subnetworks (sets of hidden units)
 def run_parcellation(
         output_dir=OUTPUT_DIR,
         n_networks=50,
@@ -636,29 +643,32 @@ def run_parcellation(
         data = load_h5_data(inpath, verbose=verbose, indent=indent)
 
         if overwrite or not 'parcellation' in data:
-            R = np.nan_to_num(data['connectivity'])
-            R = np.abs(R)
+            # Load the correlation matrix (connectome)
+            R = np.nan_to_num(data['connectivity'])  # Replace any NaN values with 0
+            R = np.abs(R)  # Take absolute value of correlations
 
+            # Sample parcellations using k-means clustering
             sample = sample_parcellations(
-                R,
-                n_networks=n_networks,
-                n_samples=n_samples,
-                binarize_connectivity=binarize_connectivity,
-                connectivity_pca_components=connectivity_pca_components,
-                connectivity_ica_components=connectivity_ica_components,
+                R,  # The correlation matrix
+                n_networks=n_networks,  # Number of subnetworks (clusters to find)
+                n_samples=n_samples,    # Number of times to run clustering
+                binarize_connectivity=binarize_connectivity,  # Whether to threshold correlations
+                connectivity_pca_components=connectivity_pca_components,  # Optional PCA
+                connectivity_ica_components=connectivity_ica_components,  # Optional ICA
                 clustering_kwargs=clustering_kwargs,
                 verbose=verbose,
                 indent=indent + 2
             )
+            # Take the multiple clusterings from sample_parcellations() and align them
             parcellation = align_samples(
-                sample['samples'],
-                sample['scores'],
-                n_alignments=n_alignments,
-                weight_samples=weight_samples,
+                sample['samples'],  # The multiple clusterings (#samples × #units), #units = #layers x #embedding_size
+                sample['scores'],   # The quality score for each clustering
+                n_alignments=n_alignments,  # How many times to try aligning
+                weight_samples=weight_samples,  # Whether to weight by clustering quality
                 verbose=verbose,
                 indent=indent + 2
             )
-            data['parcellation'] = parcellation
+            data['parcellation'] = parcellation  # Save the aligned parcellation (#units, #subnetworks). parcellation[i,j] = probability of unit i to belong to subnetwork j
 
             save_h5_data(
                 data,
@@ -671,6 +681,7 @@ def run_parcellation(
                 stderr('%sElapsed time: %.2f s\n' % (' ' * (indent + 2), time.time() - t0))
 
 
+# Find networks that are stable across all domains
 def run_subnetwork_extraction(
         output_dir=OUTPUT_DIR,
         verbose=True,
@@ -685,6 +696,7 @@ def run_subnetwork_extraction(
 
     parcellations = {}
     coordinates = None
+    # Load parcellation results for each different domain
     for path in os.listdir(connectivity_dir):
         match = INPUT_NAME_RE.match(path)
         if match and match.group(1) == CONNECTIVITY_NAME:
@@ -706,10 +718,13 @@ def run_subnetwork_extraction(
     shared_subnetworks = {}
     domains = sorted(list(parcellations.keys()))
     n_domains = len(domains)
+    # Find matching netwokrs across different domains
     for d1 in range(len(domains)):
         domain1 = domains[d1]
         for d2 in range(d1 + 1, len(domains)):
             domain2 = domains[d2]
+
+            # Get parcellations for both domains
             parcellation1 = parcellations[domain1].T  # <n_networks, n_units>
             parcellation2 = parcellations[domain2].T  # <n_networks, n_units>
             n_networks = parcellation1.shape[0]
@@ -717,10 +732,14 @@ def run_subnetwork_extraction(
 
             _parcellation1 = standardize_array(parcellation1)
             _parcellation2 = standardize_array(parcellation2)
+
+            # Compute similarity between networks across domains
             scores = np.dot(
                 _parcellation1,
                 _parcellation2.T,
             ) / n_units
+
+            # Find matching networks
             alignment1 = np.argmax(scores, axis=1)
             alignment2 = np.argmax(scores, axis=0)
             matches = np.arange(n_networks) == alignment2[alignment1]
@@ -746,7 +765,8 @@ def run_subnetwork_extraction(
                 d_ix += 1
             else:
                 break
-
+        
+        # If network exists in all domains, average them
         if len(network) == len(domains):
             network = np.stack(network, axis=0).mean(axis=0)
             networks.append(network)
@@ -785,6 +805,8 @@ def run_knockout(
 ):
     if connectivity_kwargs is None:
         connectivity_kwargs = {}
+    
+    # Define directories
     subnetwork_dir = os.path.join(output_dir, SUBNETWORK_NAME)
     knockout_dir = os.path.join(output_dir, 'knockout')
 
@@ -795,6 +817,7 @@ def run_knockout(
     if not os.path.exists(knockout_dir):
         os.makedirs(knockout_dir)
 
+    # Load the parcellation file containing stable subnetworks
     for path in os.listdir(subnetwork_dir):
         match = INPUT_NAME_RE.match(path)
         if not match:
@@ -804,6 +827,7 @@ def run_knockout(
         if 'parcellation' not in data:
             continue
 
+        # Compute connectome with network knockout
         run_connectivity(
             model_name=model_name,
             output_dir=knockout_dir,
@@ -814,6 +838,7 @@ def run_knockout(
             **connectivity_kwargs
         )
 
+        # Plot results
         for step in steps:
             if step == 'plot_stability':
                 plot_stability(

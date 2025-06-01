@@ -22,6 +22,7 @@ if __name__ == '__main__':
     else:
         cfg = {}
 
+    # Connectivity: create connectome (correlation matrix) between all pairs of hidden units (activation dimensions) in the model for some sampled text
     if 'all' in steps or 'connectivity' in steps:
         run_connectivity(
             output_dir=cfg.get('output_dir', OUTPUT_DIR),
@@ -29,6 +30,7 @@ if __name__ == '__main__':
             **cfg.get('connectivity', {})
         )
 
+    # Parcellation: assign the probability of each hidden unit to belong to each of the subnetworks (k-mean clusters)
     if 'all' in steps or 'parcellation' in steps:
         run_parcellation(
             output_dir=cfg.get('output_dir', OUTPUT_DIR),
@@ -36,6 +38,7 @@ if __name__ == '__main__':
             **cfg.get('parcellation', {})
         )
 
+    # Stable subnetworks: Find networks that are stable across all domains
     if 'all' in steps or 'subnetwork_extraction' in steps:
         run_subnetwork_extraction(
             output_dir=cfg.get('output_dir', OUTPUT_DIR),
